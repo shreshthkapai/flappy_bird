@@ -276,6 +276,7 @@ class MyAgent:
 if __name__ == '__main__':
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
+    os.chdir(script_dir)  # Change working directory to the script's directory
     config_path = os.path.join(script_dir, 'config.yml')
 
     parser = argparse.ArgumentParser(description='Run Flappy Bird with MyAgent.')
