@@ -108,6 +108,20 @@ class MyAgent:
         
         return np.array([bird_y, bird_velocity, pipe_distance, top_pipe_height, bottom_pipe_height], dtype=np.float32)
 
+    def one_hot(self, action_index):
+        """
+        Convert action index to one-hot encoding.
+        
+        Args:
+            action_index: index of the action (0 for jump, 1 for do_nothing)
+        Returns:
+            one_hot_vector: one-hot encoded vector representing the action
+        """
+        # For Flappy Bird, we have 2 possible actions (jump or do_nothing)
+        one_hot_vector = np.zeros(self.action_dim)
+        one_hot_vector[action_index] = 1.0
+        return one_hot_vector
+
     def choose_action(self, state: dict, action_table: dict) -> int:
         """
         Use epsilon-greedy policy to choose an action.
