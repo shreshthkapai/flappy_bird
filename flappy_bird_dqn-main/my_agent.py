@@ -66,6 +66,10 @@ class MyAgent:
         self.prev_state = None
         self.prev_action = None
         
+        # Track game stats for reward calculation
+        self.last_score = 0
+        self.last_mileage = 0
+        
         # do not modify this
         if load_model_path:
             self.load_model(load_model_path)
@@ -122,6 +126,48 @@ class MyAgent:
         one_hot_vector[action_index] = 1.0
         return one_hot_vector
 
+    def REWARD(self, env_score, env_mileage, is_game_over, done_type=None):
+        """
+        Calculate reward based on game state.
+        
+        Args:
+            env_score: number of pipes passed
+            env_mileage: number of frames survived
+            is_game_over: whether the game is over
+            done_type: type of game over ('well_done' for success, None or other for failure)
+            
+        Returns:
+            reward: numerical reward value
+        """
+        reward = 0.0
+        
+        # Calculate score delta (reward for passing pipes)
+        score_delta = env_score - self.last_score
+        if score_delta > 0:
+            # Significant reward for passing a pipe
+            reward += 10.0 * score_delta
+        
+        # Calculate mileage delta (reward for surviving)
+        mileage_delta = env_mileage - self.last_mileage
+        if mileage_delta > 0:
+            # Small positive reward for each step survived
+            reward += 0.1 * mileage_delta
+        
+        # Penalty for game over (unless it's a successful completion)
+        if is_game_over:
+            if done_type == 'well_done':
+                # Big reward for successfully completing a level
+                reward += 50.0
+            else:
+                # Negative reward for failing
+                reward -= 15.0
+        
+        # Update the tracking variables
+        self.last_score = env_score
+        self.last_mileage = env_mileage
+        
+        return reward
+
     def choose_action(self, state: dict, action_table: dict) -> int:
         """
         Use epsilon-greedy policy to choose an action.
@@ -150,7 +196,7 @@ class MyAgent:
         else:
             return action_table['do_nothing']
 
-    def receive_after_action_observation(self, state: dict, action_table: dict) -> None:
+    def after_action_observation(self, state: dict, action_table: dict = None) -> None:
         """
         Store experience and train the network.
         
@@ -169,15 +215,14 @@ class MyAgent:
         current_state = self.build_state(state)
         
         # If we have a previous state-action pair, we can form a complete experience tuple
-        if self.prev_state is not None:
+        if self.prev_state is not None and action_table is not None:
             # Calculate reward based on the game state
-            reward = 0.1  # Small positive reward for surviving
-            
-            if state['done']:
-                if state['done_type'] == 'well_done':
-                    reward = 10.0  # Big reward for completing level
-                else:
-                    reward = -10.0  # Negative reward for failing
+            reward = self.REWARD(
+                env_score=state.get('score', 0),
+                env_mileage=state.get('mileage', 0),
+                is_game_over=state.get('done', False),
+                done_type=state.get('done_type', None)
+            )
             
             # Store the experience tuple (s, a, r, s', done) in replay memory
             action_idx = 0 if self.prev_action == action_table['jump'] else 1
@@ -186,7 +231,7 @@ class MyAgent:
                 action_idx,
                 reward,
                 current_state,
-                state['done']
+                state.get('done', False)
             ))
             
             # Train the network if we have enough samples
@@ -198,12 +243,28 @@ class MyAgent:
                 self.epsilon *= self.epsilon_decay
         
         # Update previous state and action
-        if not state['done']:
+        if not state.get('done', False):
             self.prev_state = current_state
-            self.prev_action = action_table['jump'] if state['bird_velocity'] < 0 else action_table['do_nothing']
+            if action_table is not None:
+                self.prev_action = action_table['jump'] if state.get('bird_velocity', 0) < 0 else action_table['do_nothing']
         else:
+            # Reset tracking variables when game is over
             self.prev_state = None
             self.prev_action = None
+            self.last_score = 0
+            self.last_mileage = 0
+
+    def receive_after_action_observation(self, state: dict, action_table: dict = None) -> None:
+        """
+        Process observations after an action has been taken.
+        
+        Args:
+            state: post-action state representation (the state dictionary from the game environment)
+            action_table: the action code dictionary
+        Returns:
+            None
+        """
+        self.after_action_observation(state, action_table)
 
     def train_network(self):
         """
@@ -319,6 +380,11 @@ if __name__ == '__main__':
             best_mileage = env.mileage
             agent.save_model(path='my_model.ckpt')
             print(f"New best model saved! Score: {best_score}, Mileage: {best_mileage}")
+        
+        # Clear memory every 10 episodes to prevent obsolete q-values
+        if episode % 10 == 0 and episode > 0:
+            agent.storage.clear()
+            print("Memory cleared!")
 
     # the below resembles how we evaluate your agent
     env2 = FlappyBirdEnv(config_file_path='config.yml', show_screen=False, level=args.level)
