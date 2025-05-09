@@ -190,15 +190,20 @@ class MyAgent:
             q_values = self.network.predict(state_features.reshape(1, -1))
             action_idx = np.argmax(q_values)
         
+        # Store the current state for use in after_action_observation
+        self.prev_state = state_features
+        
         # Map the action index to the actual action code
         if action_idx == 0:
+            self.prev_action = 0  # Store action index (0 = jump)
             return action_table['jump']
         else:
+            self.prev_action = 1  # Store action index (1 = do_nothing)
             return action_table['do_nothing']
 
     def after_action_observation(self, state: dict, action_table: dict = None) -> None:
         """
-        Store experience and train the network.
+        Process observations after an action has been taken and train the network.
         
         Args:
             state: post-action state representation (the state dictionary from the game environment)
@@ -206,49 +211,86 @@ class MyAgent:
         Returns:
             None
         """
-        if self.mode != 'train':
-            # In evaluation mode, we don't train the agent
-            self.prev_state = None
-            self.prev_action = None
+        if self.mode != 'train' or self.prev_state is None or self.prev_action is None:
+            # Skip if not in training mode or no previous state-action pair
             return
         
-        current_state = self.build_state(state)
+        # Process next state
+        next_state = self.build_state(state)
         
-        # If we have a previous state-action pair, we can form a complete experience tuple
-        if self.prev_state is not None and action_table is not None:
-            # Calculate reward based on the game state
-            reward = self.REWARD(
-                env_score=state.get('score', 0),
-                env_mileage=state.get('mileage', 0),
-                is_game_over=state.get('done', False),
-                done_type=state.get('done_type', None)
-            )
+        # Calculate reward
+        reward = self.REWARD(
+            env_score=state.get('score', 0),
+            env_mileage=state.get('mileage', 0),
+            is_game_over=state.get('done', False),
+            done_type=state.get('done_type', None)
+        )
+        
+        # Store transition in replay memory
+        self.storage.append((
+            self.prev_state,         # s_t
+            self.prev_action,        # a_t 
+            reward,                  # r_t
+            next_state,              # s_{t+1}
+            state.get('done', False) # done flag
+        ))
+        
+        # Sample and train only if we have enough samples
+        if len(self.storage) >= self.n:
+            # Sample minibatch from replay memory
+            minibatch = random.sample(self.storage, self.n)
             
-            # Store the experience tuple (s, a, r, s', done) in replay memory
-            action_idx = 0 if self.prev_action == action_table['jump'] else 1
-            self.storage.append((
-                self.prev_state,
-                action_idx,
-                reward,
-                current_state,
-                state.get('done', False)
-            ))
+            # Unpack transitions
+            states = np.vstack([exp[0] for exp in minibatch])
+            actions = np.array([exp[1] for exp in minibatch])
+            rewards = np.array([exp[2] for exp in minibatch])
+            next_states = np.vstack([exp[3] for exp in minibatch])
+            dones = np.array([exp[4] for exp in minibatch], dtype=int)
             
-            # Train the network if we have enough samples
-            if len(self.storage) >= self.n:
-                self.train_network()
+            # Get Q values for next states using target network (Q_f)
+            q_values_next = self.network2.predict(next_states)
+            max_q_values_next = np.max(q_values_next, axis=1)
+            
+            # Calculate target values y_j
+            targets = rewards + (1 - dones) * self.discount_factor * max_q_values_next
+            
+            # Get current Q values for states
+            current_q_values = self.network.predict(states)
+            
+            # Create target array (a copy of current Q values)
+            target_q_values = current_q_values.copy()
+            
+            # Update target for the selected actions
+            for i in range(self.n):
+                target_q_values[i, actions[i]] = targets[i]
+            
+            # Create mask for loss function (focus only on the actions taken)
+            mask = np.zeros_like(target_q_values)
+            for i in range(self.n):
+                mask[i, actions[i]] = 1
+            
+            # Train the network
+            self.network.fit_step(states, target_q_values, mask)
+            
+            # Increment training steps counter
+            self.training_steps += 1
+            
+            # Update target network periodically
+            if self.training_steps % self.update_target_freq == 0:
+                MyAgent.update_network_model(net_to_update=self.network2, net_as_source=self.network)
             
             # Decay epsilon
             if self.epsilon > self.epsilon_min:
                 self.epsilon *= self.epsilon_decay
         
-        # Update previous state and action
+        # Update previous state and action for next iteration
         if not state.get('done', False):
-            self.prev_state = current_state
+            self.prev_state = next_state
+            # Infer the previous action from bird velocity if action_table is provided
             if action_table is not None:
-                self.prev_action = action_table['jump'] if state.get('bird_velocity', 0) < 0 else action_table['do_nothing']
+                self.prev_action = 0 if state.get('bird_velocity', 0) < 0 else 1
         else:
-            # Reset tracking variables when game is over
+            # Reset state and action tracking when game is over
             self.prev_state = None
             self.prev_action = None
             self.last_score = 0
